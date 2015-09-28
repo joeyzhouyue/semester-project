@@ -1,0 +1,88 @@
+% VDBattery Battery model.
+% This class describes the basic Battery model. Add an instance of this
+% class to the properties of a vehicle class. Initialize it with the
+% constructor of the vehicle class (do not initialize it with a default
+% value. In that case Different vehicles point towards the same Battery
+% object.) The available Battery models are defined within the function
+% 'createComponentModel'.
+classdef (Sealed=true) VDBattery < VDComponentAbstract & handle
+    
+    properties (Access=public)
+        
+        capacityPerModule
+        stateOfChargeVec              % SOC Vector for internal Resistance 
+                                      % and opencirquit voltage
+        stateOfCharge                 % current state of charge value
+
+%... other properties to be modeled, which could be accessed publically 
+
+    end % public properties
+    
+    properties (Access=public, Dependent=true)
+        capacity
+        intResistance
+        voltageOpenCircuit
+%... other properties dependent on the public properties
+                
+    end % public & dependent properties
+    
+    % The constructor is hidden because otherwise it is seen like regular
+    % properties of the Battery that is initialized in the vehicle class,
+    % e.g when typing Veh.Battery.<tab>.
+    methods (Hidden=true)
+        function obj = VDBattery(cmpmodel)
+            if nargin==0
+                cmpmodel = '';
+            end
+            % VDBattery Construct a Battery model.
+            obj.nameTag = 'Battery Model';
+            obj.description = 'Basic Battery Model';
+            % Get the component outline from VDModelParser
+            CmpOutline = VDModelParser('Battery', cmpmodel);
+            % Create and modify model specific parameters
+            createComponentModel(obj, CmpOutline.modelname); % specify the features of the battery to be modelled
+            modifyComponentModel(obj, CmpOutline.specifics); % modify the standard battery model if neccessary
+            % Check if all properties are set
+            checkProperties(obj);
+        end % constructor function
+    end % constructor method
+    
+    % The follwoing methods avoid setting invalid properties. Matlab allows
+    % this inplementation only for methods with no attributes.
+    methods
+        
+        function set.capacityPerModule(obj, val)
+            evt = VDEventPropChange(obj, val);
+            obj.capacityPerModule = obj.checkInput(val, '1x1', 'Ah', 'R>=0');
+            logAndNotifyPropertyChange(evt, 'ChangeWithinComponent');
+        end % set.capacityPerModule
+
+%... setting other public features of the battery
+        
+    end % set.property methods
+
+    
+    % The following methods are needed for the dependent properties. Matlab
+    % allows this inplementation only for methods with no attributes.
+    methods
+        function capacity = get.capacity(obj)
+            capacity = obj.capacityPerModule * obj.numModulesPar;
+        end % get.capacity, get the total capacity of the battery
+        
+%... setting other depedent properties
+      
+    end % get.property methods
+    
+    methods (Access=public)        
+        intResistance = getIntResistance(obj, stateOfCharge);
+        openCircuitVoltage = getOpenCircuitVoltage(obj, stateOfCharge);
+        %varargout = plotSimQssResults(obj)
+    end % methods
+
+    % The implementation of the following methods are forced by the
+    % abstract superclass 'VDComponentAbstract'.
+    methods (Access=protected)
+        createComponentModel(obj, modelname);
+        modifyComponentModel(obj, specifics);
+    end % protected methods
+end % class
