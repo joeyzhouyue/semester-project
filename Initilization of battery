@@ -1,0 +1,22 @@
+function createComponentModel(obj, modelname)
+% createComponentModel Initialize Battery model.
+% initialize the specifications of the battery we use
+switch lower(rmpncts(modelname))
+    case {'','liti'} % default case is LiTi-Battery
+        if isempty(modelname)
+            obj.modelName = 'LiTi';
+        else
+            obj.modelName = modelname;
+        end
+        obj.capacityPerModule = unit(60,'Ah');
+        obj.intResistancePerModule = unit(0.099:0.0001:0.101,'Ohm');
+        obj.stateOfChargeVec = 0:0.05:1;
+%... feature specifications of this battery
+        obj.numModulesPar = unit(1,'');
+        obj.numModulesSer = unit(1,'');
+        obj.stateOfCharge = 0.5;
+    otherwise
+        error(['Unknown Battery model: "',modelname,'".']);
+end % switch
+
+end % function
