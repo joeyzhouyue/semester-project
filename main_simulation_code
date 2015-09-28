@@ -1,0 +1,324 @@
+% Ensure everything is set to initial conditions.
+clear all; 
+close all; 
+clc;
+
+% Add the ocdet toolbox.
+pathThisFile = mfilename('fullpath');
+mainPath = fileparts(fileparts(pathThisFile));
+addpath(genpath(fullfile(mainPath, 'MatlabUnits')));
+%... add other paths
+
+% Load driving cycle.
+Cyc = VDCycleQss('Braunschweig');
+
+% Create object-oriented vehicle model.
+Veh = VDHybridVehicle('bev1');
+
+% Compute the traction force.
+theVehicleBody = Veh.Chassis.VehicleBody;
+theUnderCarriage = Veh.Chassis.UnderCarriage;
+aerodynDrag = convert(1/2 * const('rhoAir') * theVehicleBody.frontalArea * ...
+    theVehicleBody.aeroDrag * Cyc.velocity.^2, 'N');
+rollingFriction = (Cyc.velocity > unit(eps, 'm/s')) .* cos(Cyc.grade) ...
+    .* Veh.mass * const('g') .* polyval(theUnderCarriage.rollResist, ...
+    Cyc.velocity);
+upHillDriving = sin(Cyc.grade) .* Veh.mass * const('g');
+
+inertialForces(:,1) = Veh.mass .* Cyc.acceleration; %vehicle inertial force
+inertialForces(:,2) = theUnderCarriage.wheelInert / ...
+    theUnderCarriage.wheelRad^2 .* Cyc.acceleration; %wheels inertial force
+inertialForces(:,3) = Veh.Gearbox.inertias(1) * Veh.Axle.ratio^2 / ...
+    theUnderCarriage.wheelRad^2 .* Cyc.acceleration;%gearbox inertial force
+inertialForces(:,4) = Veh.Motor.ElMachine.inertia * ...
+    (Veh.Axle.ratio*Veh.Gearbox.gearRatios(1))^2 / ...
+    theUnderCarriage.wheelRad^2 .* Cyc.acceleration; %motor inertial force
+totalinertialForces = sum(inertialForces, 2); %total inertial force
+tracForce = aerodynDrag + rollingFriction + upHillDriving + ...
+    totalinertialForces;
+
+% -------------------------------------------------------------------------
+% Span grid for gear strategy, here is one single-gear used.
+velocityGrid = repmat(Cyc.velocity, 1, Veh.Gearbox.nGears);
+tracForceGrid = repmat(tracForce, 1, Veh.Gearbox.nGears);
+gearGrid = repmat(1:Veh.Gearbox.nGears, length(Cyc.velocity), 1);
+%--------------------------------------------------------------------------
+
+% Simulate vehicle on cycle. One bus power train
+% calculate the torque and speed on different part of the vehicle power train
+[rotSpeed_wheel, torque_wheel] = simQss(Veh.Chassis, velocityGrid, tracForceGrid);
+[rotSpeed_axle, torque_axle] = simQss(Veh.Axle, rotSpeed_wheel, torque_wheel);
+[rotSpeed_GB_out, torque_GB_out] = simQss(Veh.Gearbox, rotSpeed_axle, torque_axle, gearGrid);
+save('plot_daten.mat','Veh', 'rotSpeed_GB_out', 'torque_GB_out');
+MotorPower = simQss(Veh.Motor, rotSpeed_GB_out, torque_GB_out);
+%elektrischer nebenverbrauch  time-variable
+TotalPower_driving_cycle = MotorPower + findAuxiliaryPower(Veh.Auxiliary);
+% save('plot_daten.mat','TotalPower_driving_cycle');
+TotalPower_driving_cycle_net = zeros(length(TotalPower_driving_cycle),1);
+TotalPower_driving_cycle_net(TotalPower_driving_cycle>unit(0,'kW')) = TotalPower_driving_cycle(TotalPower_driving_cycle>unit(0,'kW')); % no energy can be regenerated to the network
+TotalEnergy_driving_cycle_no_Batt = sum(TotalPower_driving_cycle_net);
+TotalEnergy_driving_cycle_no_Batt = convert(unit(TotalEnergy_driving_cycle_no_Batt,'J'),'kWh');
+P_net_single_ohne_noBatt = TotalPower_driving_cycle_net/1000; % energy needed from the overhead wire for one single bus without battery
+% speed and torque data over the time from the specific duty cycle 
+cyc_time = Cyc.time;
+cyc_velocity = Cyc.velocity;
+save('plot_daten.mat','cyc_time','cyc_velocity','P_net_single_ohne_noBatt','-append');
+
+%% 10 buses on the cycle
+nBus = 10;
+nRound = 3; % the round number of the duty cycle the vehicles run
+time_round_2nd = length(Cyc.time)+1:length(Cyc.time)*2;
+[Total_time_all,TotalPower_all_bus,Power_individual,TotalPower_all_bus_no]...
+    =TotalPower_all(TotalPower_driving_cycle,Cyc.time,nBus,nRound);
+TotalPower_all_bus_yes = TotalPower_all_bus; % with brake energy exchange
+TotalPower_all_bus_yes(TotalPower_all_bus_yes<0) = unit(0,'W');
+
+%% scenario a) no battery, 0/10 Battery ratio (with/without brake energy exchange)
+% with brake energy transferable between buses
+power_round_2nd = TotalPower_all_bus(time_round_2nd);
+Power_round_2nd_net = power_round_2nd;
+Power_round_2nd_net(double(Power_round_2nd_net)<0)= unit(0,'kW');
+P_net_flotte_0_10_mit_noBatt = Power_round_2nd_net/1000;
+save('plot_daten.mat','P_net_flotte_0_10_mit_noBatt','-append');
+Power_round_2nd_net_max = max(Power_round_2nd_net);
+Energy_round_2nd_net = unit(double(sum(Power_round_2nd_net)),'J');
+Energy_round_2nd_net = convert(Energy_round_2nd_net,'kWh'); 
+% without brake energy exchange between buses
+Power_round_2nd_net_no = TotalPower_all_bus_no(time_round_2nd);
+Power_round_2nd_net_no_max = max(Power_round_2nd_net_no);
+Energy_round_2nd_net_no = unit(double(sum(Power_round_2nd_net_no)),'J');
+Energy_round_2nd_net_no = convert(Energy_round_2nd_net_no,'kWh'); 
+
+
+%% data for example plots 
+k_plot_e = 0; % weighting for only energy economy
+s_eq_start1 =   0.9765;
+s_eq_start2 =   0.9765;
+% apply Pontryagin method for one of the buses, because all the vehicles are assumed to have the same optimal control strategy.
+[ ~, ~, ~, ~,P_net_op_t_vec_k_plot_e, ~, ~ ] = Pontryagin_Battery_Strategy...
+    (TotalPower_driving_cycle, Cyc, Veh.Battery, k_plot_e, s_eq_start1,s_eq_start2);
+
+k_plot_p = 1000/double(mean(Power_round_2nd_net)); % weighting for more peak load shaving
+s_eq_start1 = 184.114;
+s_eq_start2 = 184.114;
+% apply Pontryagin method for one of the buses, because they are all the same.
+[ ~, ~, ~, ~,P_net_op_t_vec_k_plot_p, ~, ~ ] = Pontryagin_Battery_Strategy...
+    (TotalPower_driving_cycle, Cyc, Veh.Battery, k_plot_p, s_eq_start1,s_eq_start2);
+
+% Ein einzelner Batterie-Trolley-Bus, ohne Rueckspeisung, k=0
+k = 0; % Energy economy mode
+s_eq_start1 = 0.9765;
+s_eq_start2 = 0.9765;
+% apply Pontryagin method for one of the buses, because they are all the same.
+[ ~, t_single_ohne_k0, SOC_single_ohne_k0, P_bat_single_ohne_k0,P_net_single_ohne_k0, ...
+    TotalPower_single_ohne_k0, ~ ] = Pontryagin_Battery_Strategy...
+    (TotalPower_driving_cycle, Cyc, Veh.Battery, k, s_eq_start1,s_eq_start2);
+t_single_ohne_k0 = t_single_ohne_k0';
+P_bat_single_ohne_k0 = P_bat_single_ohne_k0/1000;
+P_net_single_ohne_k0 = P_net_single_ohne_k0/1000;
+TotalPower_single_ohne_k0 = TotalPower_single_ohne_k0/1000;
+save('plot_daten.mat','t_single_ohne_k0','SOC_single_ohne_k0',...
+    'P_bat_single_ohne_k0','P_net_single_ohne_k0','TotalPower_single_ohne_k0','-append');
+
+
+% Ein einzelner Batterie-Trolley-Bus, ohne Rueckspeisung, k>>0
+k = 1000/double(mean(Power_round_2nd_net));
+s_eq_start1 = 184.114;
+s_eq_start2 = 184.114;
+% apply Pontryagin method for one of the buses, because they are all the same.
+[ ~, t_single_ohne_k1000, SOC_single_ohne_k1000, P_bat_single_ohne_k1000,P_net_single_ohne_k1000, ...
+    TotalPower_single_ohne_k1000, ~ ] = Pontryagin_Battery_Strategy...
+    (TotalPower_driving_cycle, Cyc, Veh.Battery, k, s_eq_start1,s_eq_start2);
+t_single_ohne_k1000 = t_single_ohne_k1000';
+P_bat_single_ohne_k1000 = P_bat_single_ohne_k1000/1000;
+P_net_single_ohne_k1000 = P_net_single_ohne_k1000/1000;
+TotalPower_single_ohne_k1000 = TotalPower_single_ohne_k1000/1000;
+save('plot_daten.mat','t_single_ohne_k1000','SOC_single_ohne_k1000',...
+    'P_bat_single_ohne_k1000','P_net_single_ohne_k1000','TotalPower_single_ohne_k1000','-append');
+
+% Busflotte(1/10), mit Rueckspeisung, k=0
+Battery_1 = VDBattery;
+Battery_1.numModulesPar = 1;
+k_yes = 0;
+s_eq_start1_yes = 0.9767;
+s_eq_start2_yes = 0.9767;
+[ ~, t_flotte_1_10_mit_k0, SOC_flotte_1_10_mit_k0, P_bat_flotte_1_10_mit_k0, ...
+    P_net_flotte_1_10_mit_k0,TotalPower_flotte_1_10_mit_k0, ~] = Pontryagin_Battery_Strategy...
+    (power_round_2nd, Cyc, Battery_1, k_yes, s_eq_start1_yes,s_eq_start2_yes);
+P_net_flotte_1_10_mit_k0(P_net_flotte_1_10_mit_k0<0) = 0;
+t_flotte_1_10_mit_k0 = t_flotte_1_10_mit_k0';
+P_bat_flotte_1_10_mit_k0 = P_bat_flotte_1_10_mit_k0/1000;
+P_net_flotte_1_10_mit_k0 = P_net_flotte_1_10_mit_k0/1000;
+TotalPower_flotte_1_10_mit_k0 = TotalPower_flotte_1_10_mit_k0/1000;
+save('plot_daten.mat','t_flotte_1_10_mit_k0','SOC_flotte_1_10_mit_k0',...
+    'P_bat_flotte_1_10_mit_k0','P_net_flotte_1_10_mit_k0','TotalPower_flotte_1_10_mit_k0','-append');
+
+% Busflotte(1/10), mit Rueckspeisung, k>>0
+Battery_1 = VDBattery;
+Battery_1.numModulesPar = 1;
+k_yes = 0.1/double(mean(Power_round_2nd_net));
+s_eq_start1_yes = 1.1677;
+s_eq_start2_yes = 1.1677;
+[ ~, t_flotte_1_10_mit_k01, SOC_flotte_1_10_mit_k01, P_bat_flotte_1_10_mit_k01, ...
+    P_net_flotte_1_10_mit_k01,TotalPower_flotte_1_10_mit_k01, ~] = Pontryagin_Battery_Strategy...
+    (power_round_2nd, Cyc, Battery_1, k_yes, s_eq_start1_yes,s_eq_start2_yes);
+P_net_flotte_1_10_mit_k01(P_net_flotte_1_10_mit_k01<0) = 0;
+t_flotte_1_10_mit_k01 = t_flotte_1_10_mit_k01';
+P_bat_flotte_1_10_mit_k01 = P_bat_flotte_1_10_mit_k01/1000;
+P_net_flotte_1_10_mit_k01 = P_net_flotte_1_10_mit_k01/1000;
+TotalPower_flotte_1_10_mit_k0 = TotalPower_flotte_1_10_mit_k0/1000;
+save('plot_daten.mat','t_flotte_1_10_mit_k01','SOC_flotte_1_10_mit_k01',...
+    'P_bat_flotte_1_10_mit_k01','P_net_flotte_1_10_mit_k01','TotalPower_flotte_1_10_mit_k01','-append');
+
+% Busflotte(10/10), mit Rueckspeisung, k=0
+Battery_10 = VDBattery;
+Battery_10.numModulesPar = 10;
+k_yes = 0;
+s_eq_start1_yes = 0.9971;
+s_eq_start2_yes = 0.9971;
+[ ~, t_flotte_10_10_mit_k0, SOC_flotte_10_10_mit_k0, P_bat_flotte_10_10_mit_k0, ...
+    P_net_flotte_10_10_mit_k0,TotalPower_flotte_10_10_mit_k0, ~ ] = Pontryagin_Battery_Strategy...
+    (power_round_2nd, Cyc, Battery_10, k_yes, s_eq_start1_yes,s_eq_start2_yes);
+P_net_flotte_10_10_mit_k0(P_net_flotte_10_10_mit_k0<0) = 0;
+t_flotte_10_10_mit_k0 = t_flotte_10_10_mit_k0';
+P_bat_flotte_10_10_mit_k0 = P_bat_flotte_10_10_mit_k0/1000;
+P_net_flotte_10_10_mit_k0 = P_net_flotte_10_10_mit_k0/1000;
+TotalPower_flotte_1_10_mit_k0 = TotalPower_flotte_1_10_mit_k0/1000;
+save('plot_daten.mat','t_flotte_10_10_mit_k0','SOC_flotte_10_10_mit_k0',...
+    'P_bat_flotte_10_10_mit_k0','P_net_flotte_10_10_mit_k0','TotalPower_flotte_10_10_mit_k0','-append');
+
+
+% Busflotte(10/10), mit Rueckspeisung, k>>0
+Battery_10 = VDBattery;
+Battery_10.numModulesPar = 10;
+k_yes = 1000/double(mean(Power_round_2nd_net));
+s_eq_start1_yes = 1.6978e+03;
+s_eq_start2_yes = 1.6978e+03;
+[ ~, t_flotte_10_10_mit_k1000, SOC_flotte_10_10_mit_k1000, P_bat_flotte_10_10_mit_k1000, ...
+    P_net_flotte_10_10_mit_k1000,TotalPower_flotte_10_10_mit_k1000, ~ ] = Pontryagin_Battery_Strategy...
+    (power_round_2nd, Cyc, Battery_10, k_yes, s_eq_start1_yes,s_eq_start2_yes);
+P_net_flotte_10_10_mit_k1000(P_net_flotte_10_10_mit_k1000<0) = 0;
+t_flotte_10_10_mit_k1000 = t_flotte_10_10_mit_k1000';
+P_bat_flotte_10_10_mit_k1000 = P_bat_flotte_10_10_mit_k1000/1000;
+P_net_flotte_10_10_mit_k1000 = P_net_flotte_10_10_mit_k1000/1000;
+TotalPower_flotte_1_10_mit_k0 = TotalPower_flotte_1_10_mit_k0/1000;
+save('plot_daten.mat','t_flotte_10_10_mit_k1000','SOC_flotte_10_10_mit_k1000',...
+    'P_bat_flotte_10_10_mit_k1000','P_net_flotte_10_10_mit_k1000','TotalPower_flotte_10_10_mit_k1000','-append');
+
+
+% After here is the calculation of the energy consumption and peak load at
+% every specific k-value in different situations. 
+% For the calculated result, please look at the file: 
+% "Plot_peak_p_vs_energy.m".
+
+
+%% b.1) 10/10 Battery ratio (without brake energy exchange)
+% Optimal control with "Pontryagin" single bus (Bilinear Method for determining S-Value)
+% k = 1000/double(mean(Power_round_2nd_net));
+k = 0;
+s_eq_start1 =   0.9765;
+s_eq_start2 =   0.9765;
+% apply Pontryagin method for one of the buses, because they are all the same.
+[ s_eq_k, t_op_vec, SOC_op_t_vec_k, P_bat_op_t_vec_k,P_net_op_t_vec_k, ...
+    TotalPower_double_op_t_vec, SOC_final ] = Pontryagin_Battery_Strategy...
+    (TotalPower_driving_cycle, Cyc, Veh.Battery, k, s_eq_start1,s_eq_start2);
+% E_net_op_k_single = sum(P_net_op_t_vec_k); % one bus, one cycle, one battery
+% E_net_op_k_single = convert(unit(E_net_op_k_single,'J'),'kWh');
+
+P_net_op_t_vec_k = unit(P_net_op_t_vec_k,'W');
+[~,TotalPower_net_all,Power_net_individual,~]...
+    =TotalPower_all(P_net_op_t_vec_k,Cyc.time,nBus,nRound);
+
+Power_round_2nd_net_op = TotalPower_net_all(time_round_2nd);
+Energy_round_2nd_net_op = unit(double(sum(Power_round_2nd_net_op)),'J');
+Energy_round_2nd_net_op = convert(Energy_round_2nd_net_op,'kWh');  % energy on net
+Power_round_2nd_net_op_max = max(Power_round_2nd_net_op); % maximum power on net
+
+figure;
+subplot(411);plot(t_op_vec',SOC_op_t_vec_k);ylabel('SOC [-]');xlim([0 1750]);
+str=sprintf('Optimal Control with Pontryagin Method with k = %d, for one single battery bus', k);title(str);
+subplot(412);plot(t_op_vec',P_bat_op_t_vec_k/1000);ylabel('P_b_a_t_t[kW]');xlim([0 1750]);ylim([-300 300]);
+subplot(413);plot(t_op_vec',P_net_op_t_vec_k/1000);ylabel('P_n_e_t[kW]');xlim([0 1750]);ylim([-300 300]);
+subplot(414);plot(t_op_vec',TotalPower_double_op_t_vec/1000);...
+    xlabel('cycle time[s]');ylabel('P_t_r[kW]');xlim([0 1750]);ylim([-300 300]);
+
+figure;plot(Cyc.time, Power_round_2nd_net_op/1000); 
+xlabel('cycle time/[s]'); ylabel('Net Power/[kW]');
+xlim([double(min(Cyc.time)) double(max(Cyc.time))]);
+figure;plot(Total_time_all, TotalPower_net_all);
+
+%% c.1) 1/10 Battery ratio (without brake energy exchange)
+% no brake energy exchange
+% no time shift for bus 1
+P_net_k_1B = convert(P_net_op_t_vec_k,'kW');
+Power_individual_net_Bus1 = Power_individual(time_round_2nd,1);
+Power_individual_net_Bus1(Power_individual_net_Bus1<0) = unit(0,'kW');
+% all buses
+Power_round_2nd_net_B1_no = Power_round_2nd_net_no - Power_individual_net_Bus1 + P_net_k_1B;
+Power_round_2nd_net_max_B1_no = max(Power_round_2nd_net_B1_no);
+% time_interval = round(length(Cyc.time) / nBus);
+Energy_round_2nd_net_B1_no = unit(double(sum(Power_round_2nd_net_B1_no)),'J');
+Energy_round_2nd_net_B1_no = convert(Energy_round_2nd_net_B1_no,'kWh');
+figure;
+plot(Cyc.time,Power_round_2nd_net_B1_no/1000);
+xlabel('cycle time/[s]'); ylabel('Net Power/[kW]');
+str=sprintf('Net Power(10 Bus) with 1 Battery Bus with weighting factor k = %d', k);title(str);
+
+% ... other scenarios of different numbers of battery buses in the bus network for no braking energy exchange
+
+%% b.2) 10/10 Battery ratio (with brake energy exchange)
+Battery_10 = VDBattery;
+Battery_10.numModulesPar = 10;
+% k_yes = 1000/double(mean(Power_round_2nd_net));
+k_yes = 0;
+s_eq_start1_yes = 0.9971;
+s_eq_start2_yes = 0.9971;
+[ s_eq_k_10, t_op_vec_10, SOC_op_t_vec_k_10, P_bat_op_t_vec_k_10, P_net_op_t_vec_k_10, ...
+    TotalPower_double_op_t_vec_10, SOC_final_10 ] = Pontryagin_Battery_Strategy...
+    (power_round_2nd, Cyc, Battery_10, k_yes, s_eq_start1_yes,s_eq_start2_yes);
+E_net_op_t_vec_k_10 = unit((sum(P_net_op_t_vec_k_10)),'J');
+E_net_op_t_vec_k_10 = convert(E_net_op_t_vec_k_10,'kWh');  % energy on net
+P_net_op_t_vec_k_max_10 = max(P_net_op_t_vec_k_10); % maximum power on net
+P_net_op_t_vec_k_max_10 = unit(P_net_op_t_vec_k_max_10,'W');
+P_net_op_t_vec_k_max_10 = convert(P_net_op_t_vec_k_max_10,'kW'); 
+
+figure;
+subplot(411);plot(t_op_vec_10',SOC_op_t_vec_k_10);xlabel('cycle time/[s]');ylabel('SOC [-]');
+str=sprintf('Optimal Control with Pontryagin Method with k = %d for collective battery of size 10', k_yes);
+title(str);
+subplot(412);plot(t_op_vec_10',P_bat_op_t_vec_k_10/1000);xlabel('cycle time/[s]');ylabel('Battery Power/[kW]');
+subplot(413);plot(t_op_vec_10',P_net_op_t_vec_k_10/1000);xlabel('cycle time/[s]');ylabel('Net Power/[kW]');
+subplot(414);plot(t_op_vec_10',TotalPower_double_op_t_vec_10/1000);...
+    xlabel('cycle time/[s]');ylabel('TotalPower /[kW]');
+
+
+%% c.2) 1/10 Battery ratio (with brake energy exchange)
+Battery_1 = VDBattery;
+Battery_1.numModulesPar = 1;
+% k_yes = 0;
+k_yes = 0.1/double(mean(Power_round_2nd_net));
+s_eq_start1_yes = 1.1777;
+s_eq_start2_yes = 1.1677;
+[ s_eq_k_1, t_op_vec_1, SOC_op_t_vec_k_1, P_bat_op_t_vec_k_1, P_net_op_t_vec_k_1, ...
+    TotalPower_double_op_t_vec_1, SOC_final_1] = Pontryagin_Battery_Strategy...
+    (power_round_2nd, Cyc, Battery_1, k_yes, s_eq_start1_yes,s_eq_start2_yes);
+P_net_op_t_vec_k_1(P_net_op_t_vec_k_1<0) = 0;
+E_net_op_t_vec_k_1 = unit((sum(P_net_op_t_vec_k_1)),'J');
+E_net_op_t_vec_k_1 = convert(E_net_op_t_vec_k_1,'kWh');  % energy on net
+P_net_op_t_vec_k_max_1 = max(P_net_op_t_vec_k_1); % maximum power on net
+P_net_op_t_vec_k_max_1 = unit(P_net_op_t_vec_k_max_1,'W');
+P_net_op_t_vec_k_max_1 = convert(P_net_op_t_vec_k_max_1,'kW'); 
+s_eq_k_1,E_net_op_t_vec_k_1,P_net_op_t_vec_k_max_1
+
+
+figure;
+subplot(411);plot(t_op_vec_1',SOC_op_t_vec_k_1);xlabel('cycle time/[s]');ylabel('SOC [-]');
+str=sprintf('Optimal Control with Pontryagin Method with k = %d for collective battery of size 1', k_yes);
+title(str);
+subplot(412);plot(t_op_vec_1',P_bat_op_t_vec_k_1/1000);xlabel('cycle time/[s]');ylabel('Battery Power/[kW]');
+subplot(413);plot(t_op_vec_1',P_net_op_t_vec_k_1/1000);xlabel('cycle time/[s]');ylabel('Net Power/[kW]');
+subplot(414);plot(t_op_vec_1',TotalPower_double_op_t_vec_1/1000);...
+     xlabel('cycle time/[s]');ylabel('TotalPower /[kW]');
+
+% ... other scenarios of different numbers of battery buses in the bus network for having braking energy exchange
+
