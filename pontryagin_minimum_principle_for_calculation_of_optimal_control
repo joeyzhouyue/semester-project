@@ -1,0 +1,120 @@
+function [ s_eq, t_op_vec, SOC_op_t_vec, P_bat_op_t_vec,P_net_op_t_vec, ...
+    TotalPower_double_op_t_vec, SOC_final ] = Pontryagin_Battery_Strategy(...
+    TotalPower, Cyc, Batt, k,s_eq_start1,s_eq_start2)
+% TotalPower: total power need for traction
+% Cyc: duty cycle object model
+% Batt: Battery object model
+% k: weighting in cost function for peak load shaving
+% s_eq: langrange multiplier for charge sustaining modus of battery control
+% s_eq_start1: the first starting guess of langrange multiplier
+% s_eq_start2: the second starting guess of langrange multiplier
+
+t_op_start = 0; % optimization start time
+t_interv = 1; % time interval for optimal control calculation
+t_op_final = double(Cyc.time(end)); % optimization final time
+% t_op_final = 1300;
+t_op_vec = t_op_start : t_interv : t_op_final;
+% s_eq_start1 = 0.9; 
+% s_eq_start2 = 1.00;
+% s_eq_start1 = 20000;
+% s_eq_start2 = 30000; % 50000
+s_eq_vec = [s_eq_start1 s_eq_start2];
+SOC_final_vec = zeros(1,2); 
+% weighted cost function between energy minimization and peak power minimization
+% k = 0;
+Cap_total = double(convert(Batt.capacity,'A*s'));
+SOC_initial = Batt.stateOfCharge;
+P_bat_op_t_vec = zeros(length(t_op_vec),1);
+P_net_op_t_vec = zeros(length(t_op_vec),1);
+SOC_op_t_vec = zeros(length(t_op_vec),1);
+TotalPower_double_op_t_vec = zeros(length(t_op_vec),1);
+SOC_final = 2; % arbitrary value for the start of "while" loop
+counter = 1; % for the starting values
+counter_s = 1;
+while (abs(SOC_final-SOC_initial)> 1e-3)
+    if counter == 1 
+        s_eq = s_eq_vec(1);
+    elseif counter == 2
+        s_eq = s_eq_vec(2);
+    else
+%         keyboard;
+        if counter ~=3
+        SOC_final_vec(1) = SOC_final_vec(2);
+        SOC_final_vec(2) = SOC_final;
+        s_eq_vec(1) = s_eq_vec(2);
+        s_eq_vec(2) = s_eq;
+        else counter = counter +1;
+        end
+        if SOC_final_vec(1)==SOC_final_vec(2) % in case of ...
+            %same control policies in last two values of s_eq
+                        s_eq = 2 * s_eq_vec(2) - s_eq_vec(1); 
+        else
+            s_eq = (s_eq_vec(2)-s_eq_vec(1))/(SOC_final_vec(2)-SOC_final_vec(1))*...
+            (SOC_initial-SOC_final_vec(2)) + s_eq_vec(2); % linear search
+        end
+    end
+    i_vec = 1;
+% find optimal control input at every time step
+    for t_op = t_op_start : t_interv : t_op_final
+        % Power needed if no battery [W]
+        TotalPower_double = double(interp1(double(Cyc.time), TotalPower, t_op)); 
+        Ri_double = double(Batt.intResistance);
+        U_oc_double = double(Batt.voltageOpenCircuit);
+        % I_bat = 1/(2*Ri_op_double)*(U_oc_op_double-sqrt((U_oc_op_double)^2-4*P_bat*Ri_op_double))
+        P_bat_min_double = double(Batt.powerMin);
+        P_bat_max_double = double(Batt.powerMax);
+% hard state constraints
+        if Batt.stateOfCharge < 0.2
+            P_bat_max_double = double(0);
+        elseif Batt.stateOfCharge > 0.8
+            P_bat_min_double = double(0);
+        end
+        
+        if P_bat_min_double <= TotalPower_double % no brake energy recuperation to trolley wire
+            P_bat_max_double = min(TotalPower_double,P_bat_max_double);
+        else
+            P_bat_max_double = P_bat_min_double;
+        end
+%         P_bat = P_bat_min_double:10000:P_bat_max_double;
+%         Hamiltonian = TotalPower_double - P_bat + s_eq * (1/(2*Ri_double)*(U_oc_double-sqrt((U_oc_double)^2-4*P_bat*Ri_double)))* U_oc_double;
+	% find the optimal control input that minimizes the cost function at this time step
+        P_bat_op_t = fminbnd(@(P_bat) (TotalPower_double - P_bat)+ k *...
+            (TotalPower_double - P_bat).^2 + s_eq * (1/(2*Ri_double)*...
+            (U_oc_double-sqrt((U_oc_double)^2 - 4*P_bat*Ri_double)))*...
+            U_oc_double, P_bat_min_double, P_bat_max_double);
+        P_bat_op_t_vec(i_vec) = P_bat_op_t;
+        P_net_op_t_vec(i_vec) = TotalPower_double - P_bat_op_t;
+        SOC_op_t_vec(i_vec) = Batt.stateOfCharge;
+        TotalPower_double_op_t_vec(i_vec) = TotalPower_double;
+        % calculate the new state of charge at next time step
+         I_bat = 1/(2*Ri_double)*(U_oc_double-sqrt((U_oc_double)^2-4*P_bat_op_t*Ri_double));
+         dSoc_dt = - I_bat/Cap_total;
+         Batt.stateOfCharge = Batt.stateOfCharge + dSoc_dt*t_interv; % Euler forward method
+        % integrating using ode23 has much more time consuming than Euer forward method, very little improvement on accurancy
+	% SOC_dyn_double = Veh.Battery.stateOfCharge;
+	% X = ode23(@(t,x) ode_Battery(t, x, Veh.Battery, P_bat_op_t), [t_op, t_op + t_interv], SOC_dyn_double);
+        i_vec = i_vec + 1;
+%         if i_vec == 200 ;
+%             keyboard;
+%         end
+    end
+%        keyboard;
+counter_s = counter_s + 1;
+    
+    SOC_final = Batt.stateOfCharge; 
+
+% numeric calculation
+    if counter == 1
+        SOC_final_vec(1) = SOC_final;
+        counter = counter + 1;
+    elseif counter == 2
+        SOC_final_vec(2) = SOC_final;
+        counter = counter + 1;
+    end
+    Batt.stateOfCharge = SOC_initial;
+    if SOC_final > 0.78 || SOC_final < 0.22
+        break;
+    end
+end
+end
+
